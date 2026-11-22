@@ -1,6 +1,6 @@
 # rex-crew
 
-An orchestrator agent (Claude Code, running in Rex) starts [pi](https://pi.dev) worker agents. Each worker gets its own
+An orchestrator agent (Claude Code, running in [Rex](https://www.superlogical.com/rex/docs/)) starts [pi](https://pi.dev) worker agents. Each worker gets its own
 git worktree, its own branch and its own Rex pane, and the orchestrator hears when it finishes. You can watch every
 worker and answer it in its pane. The orchestrator reviews, sends feedback and merges. Workers never push, merge or
 deploy.
@@ -65,7 +65,7 @@ cd ~/code/rex-crew
 ./install.sh           # copies to ~/.config/rex/crew, links ~/.local/bin/rex-crew
 ```
 
-Needs `rex`, `pi`, `jq` and `git` on PATH. For the advisor gate, pi needs the pi-advisor-flow extension and
+Needs `rex` ([Rex docs](https://www.superlogical.com/rex/docs/)), `pi`, `jq` and `git` on PATH. For the advisor gate, pi needs the pi-advisor-flow extension and
 `~/.pi/agent/advisor.json` (example in `examples/advisor.json`).
 
 **Editing:** edit here, then run `./install.sh`. A changed file is backed up beside the installed one before it is

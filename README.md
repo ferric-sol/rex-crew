@@ -20,7 +20,8 @@ Say this to Claude Code running in a Rex pane, inside your project's repository:
 > Set up rex-crew (https://github.com/ferric-sol/rex-crew), then spin up a crew to work on the feature described in
 > this issue: <issue url>
 
-The agent follows the next section.
+The agent follows the next section. To spell the steps out in the prompt instead, paste the one-paragraph version in
+`examples/orchestrator-prompt.md`.
 
 ## For the orchestrating agent
 

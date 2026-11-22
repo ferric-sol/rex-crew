@@ -1,0 +1,24 @@
+{
+  "advisor": "anthropic/claude-fable-5-2",
+  "advisorEffort": "high",
+  "alwaysOn": true,
+  "advisorToolsEnabled": true,
+  "advisorModelWhitelist": [
+    "your-provider/your-worker-model"
+  ],
+  "advisorPlanGate": true,
+  "advisorFailureGate": true,
+  "advisorCompletionGate": true,
+  "advisorCustomInvocation": "before your first edit, with a short plan as the draft (files, approach, assumptions not yet checked); after finishing each numbered finding or task item and before starting the next one, with the diff for that item as the draft; and once more on the whole diff before committing or reporting done",
+  "advisorAutoLoopGate": true,
+  "advisorLoopThreshold": 2,
+  "advisorMaxCallsPerSession": 14,
+  "gateFailureMode": "warn-and-continue",
+  "advisorBlockOnBlocked": false,
+  "contextMaxChars": 60000,
+  "advisorGitContext": "full",
+  "advisorGitContextMaxChars": 60000,
+  "advisorTrackedFileContent": true,
+  "advisorRedactSecrets": true,
+  "simpleMode": false
+}

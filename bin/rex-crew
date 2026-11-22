@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+# rex-crew: an orchestrator agent starts pi workers, each in its own git
+# worktree and its own Rex window, and is told when they finish.
+#
+#   rex-crew spawn NAME [options] -- TASK...   start a worker (a split beside the
+#                                              orchestrator; --window for a tab)
+#   rex-crew wait [--idle] [--for SECONDS]     block until a worker reports
+#   rex-crew status                            one line per worker
+#   rex-crew show NAME                         report, commits and diffstat
+#   rex-crew send NAME MESSAGE...              message a worker (review feedback)
+#   rex-crew peek NAME [LINES]                 tail of the worker's screen
+#   rex-crew focus NAME                        switch to the worker's window
+#   rex-crew path NAME                         print the worktree path
+#   rex-crew rm NAME [--force]                 close window, remove worktree and branch
+#
+# Run it from inside the project's repository (the main checkout or any worktree).
+set -euo pipefail
+
+EXT="${REX_CREW_EXT:-$HOME/.config/rex/crew/crew.ts}"
+STATE_ROOT="${REX_CREW_STATE:-$HOME/.rex/crew}"
+WT_ROOT="${REX_WORKTREES:-$HOME/.rex/worktrees}"
+
+die() { echo "rex-crew: $*" >&2; exit 1; }
+
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# The main checkout, whichever worktree we are in.
+main_repo() {
+  local common
+  common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+    die "not inside a git repository"
+  dirname "$common"
+}
+
+MAIN=""; PROJECT=""; PDIR=""
+project() {
+  MAIN="$(main_repo)"
+  PROJECT="$(basename "$MAIN")"
+  PDIR="$STATE_ROOT/$PROJECT"
+}
+
+worker_dir() {
+  local d="$PDIR/$1"
+  [ -d "$d" ] || die "no worker named '$1' in $PROJECT (rex-crew status lists them)"
+  echo "$d"
+}
+
+meta() { jq -r --arg k "$2" '.[$k] // empty' "$1/meta.json"; }
+
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+cmd_spawn() {
+  [ $# -ge 1 ] || die "spawn needs a NAME"
+  local name="$1"; shift
+  local base="HEAD" branch="" model="" thinking="" setup="" taskfile="" focus="false" layout="${REX_CREW_LAYOUT:-split}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base) base="$2"; shift 2 ;;
+      --branch) branch="$2"; shift 2 ;;
+      --model) model="$2"; shift 2 ;;
+      --thinking) thinking="$2"; shift 2 ;;
+      --setup) setup="$2"; shift 2 ;;
+      --task-file) taskfile="$2"; shift 2 ;;
+      --focus) focus="true"; shift ;;
+      --window) layout="window"; shift ;;
+      --split) layout="split"; shift ;;
+      --) shift; break ;;
+      -*) die "unknown option $1" ;;
+      *) break ;;
+    esac
+  done
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "NAME must be lowercase letters, digits and hyphens"
+  [ -n "${REX_SESSION:-}" ] || die "REX_SESSION is not set: run this inside Rex"
+  [ -f "$EXT" ] || die "worker extension missing: $EXT"
+  command -v pi >/dev/null || die "pi is not on PATH"
+
+  local task
+  if [ -n "$taskfile" ]; then task="$(cat "$taskfile")"
+  elif [ $# -gt 0 ]; then task="$*"
+  elif [ ! -t 0 ]; then task="$(cat)"
+  else die "no task: pass it after --, with --task-file, or on stdin"
+  fi
+  [ -n "$task" ] || die "the task is empty"
+
+  project
+  branch="${branch:-$name}"
+  local dir="$PDIR/$name" wt="$WT_ROOT/$PROJECT/$name"
+  [ ! -e "$dir" ] || die "worker '$name' already exists (rex-crew rm $name)"
+  [ ! -e "$wt" ] || die "$wt already exists"
+
+  local base_sha
+  base_sha="$(git -C "$MAIN" rev-parse --verify "$base^{commit}")" || die "no such base: $base"
+  mkdir -p "$(dirname "$wt")"
+  if git -C "$MAIN" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$MAIN" worktree add "$wt" "$branch" >&2
+    base_sha="$(git -C "$MAIN" merge-base "$base_sha" "$branch")"
+  else
+    git -C "$MAIN" worktree add -b "$branch" "$wt" "$base_sha" >&2
+  fi
+
+  mkdir -p "$dir/inbox"
+  printf '%s\n' "$task" > "$dir/task.md"
+  cat > "$dir/prompt.md" <<EOF
+You are "$name", a worker agent started by an orchestrator agent. You work in
+your own git worktree, $wt, on branch $branch, created from ${base_sha:0:12}.
+The user can see this session and will answer you here.
+
+- Work only inside this worktree. Do not touch the main checkout ($MAIN) or
+  other worktrees.
+- Commit your work to this branch as you go. Never push, merge, rebase onto
+  another branch, open a pull request, deploy, or touch a remote machine: the
+  orchestrator reviews and merges.
+- If you need a decision or are blocked, ask in plain text and stop. The user
+  answers in this session.
+- When the task is complete and committed, call report_done once as your last
+  action.
+- A message that starts with [orchestrator] is review feedback from the
+  orchestrator. Act on it, commit, and call report_done again.
+EOF
+  jq -n --arg name "$name" --arg project "$PROJECT" --arg main "$MAIN" --arg wt "$wt" \
+    --arg branch "$branch" --arg base "$base_sha" --arg session "$REX_SESSION" \
+    --arg created "$(now)" --arg layout "$layout" \
+    '{layout:$layout,name:$name,project:$project,main:$main,worktree:$wt,branch:$branch,base:$base,session:$session,created:$created}' \
+    > "$dir/meta.json"
+
+  local pi_bin; pi_bin="$(command -v pi)"
+  {
+    echo '#!/usr/bin/env bash'
+    printf 'export REX_CREW_DIR=%q REX_CREW_NAME=%q\n' "$dir" "$name"
+    echo 'export REX_CREW_WINDOW="$(rex whoami --json 2>/dev/null | jq -r ".window_id // empty")"'
+    printf 'export REX_CREW_LAYOUT=%q\n' "$layout"
+    # Nov 21 2026: a worker's `git commit --amend` (no -m) sat an hour in vi, which its tool can't drive. Workers'
+    # git never opens an editor: commits keep the existing/default message, rebases accept their todo as is.
+    echo 'export GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true GIT_MERGE_AUTOEDIT=no GIT_TERMINAL_PROMPT=0'
+    echo 'label() {'
+    echo '  if [ "$REX_CREW_LAYOUT" = split ]; then rex block rename "$REX_BLOCK" "$1"'
+    echo '  else rex window rename "$REX_CREW_WINDOW" "$1"; fi >/dev/null 2>&1'
+    echo '}'
+    printf 'label %q\n' "… $name"
+    printf 'cd %q || exit 1\n' "$wt"
+    if [ -n "$setup" ]; then
+      printf 'echo %q\n' "rex-crew setup: $setup"
+      printf '( %s ) || echo "rex-crew: setup failed, starting pi anyway"\n' "$setup"
+    fi
+    printf '%q --approve --name %q -e %q --append-system-prompt %q' "$pi_bin" "$name" "$EXT" "$dir/prompt.md"
+    [ -z "$model" ] || printf ' --model %q' "$model"
+    [ -z "$thinking" ] || printf ' --thinking %q' "$thinking"
+    printf ' -- "$(cat %q)"\n' "$dir/task.md"
+    echo 'code=$?'
+    printf 'printf "%%s\\texited\\tpi exit %%s\\n" "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$code" >> %q\n' "$dir/events.log"
+    printf 'echo exited > %q\n' "$dir/state"
+    printf 'label %q\n' "× $name"
+    echo 'echo "rex-crew: pi exited ($code). This window can be closed."'
+  } > "$dir/launch.sh"
+  chmod +x "$dir/launch.sh"
+  echo starting > "$dir/state"
+  : > "$dir/events.log"
+  echo 0 > "$dir/acked"
+
+  # Split layout: the first worker goes to the right of the orchestrator, each
+  # later one below the newest worker that still has a block.
+  local place=()
+  if [ "$layout" = split ] && [ -n "${REX_BLOCK:-}" ]; then
+    local live anchor="" o b
+    live="$(rex block ls -s "$REX_SESSION" -q --short=false 2>/dev/null || true)"
+    for o in $(ls -t "$PDIR"); do
+      [ "$o" != "$name" ] && [ -f "$PDIR/$o/meta.json" ] || continue
+      b="$(jq -r '.rex.block_ids[0] // empty' "$PDIR/$o/meta.json")"
+      if [ -n "$b" ] && printf '%s\n' "$live" | grep -qxF "$b"; then anchor="$b"; break; fi
+    done
+    if [ -n "$anchor" ]; then place=(--split=below -b "$anchor")
+    else place=(--split=right -b "$REX_BLOCK"); fi
+  fi
+  local out
+  out="$(rex run -s "$REX_SESSION" -c "$wt" --label "$name" --focus="$focus" --interactive \
+    --keep-open --json ${place[@]+"${place[@]}"} -- "$dir/launch.sh")" ||
+    die "rex run failed; worktree left at $wt"
+  local tmp; tmp="$(mktemp)"
+  jq --argjson run "$out" '. + {rex:$run}' "$dir/meta.json" > "$tmp" && mv "$tmp" "$dir/meta.json"
+  echo "spawned $name: branch $branch, worktree $wt"
+}
+
+block_of() {
+  local b; b="$(jq -r '.rex.block_ids[0] // empty' "$1/meta.json")"
+  [ -n "$b" ] || die "no Rex block recorded for $(basename "$1")"
+  echo "$b"
+}
+window_of() { jq -r '.rex.window_id // empty' "$1/meta.json"; }
+
+summary() {
+  local d="$1" wt branch base
+  wt="$(meta "$d" worktree)"; branch="$(meta "$d" branch)"; base="$(meta "$d" base)"
+  [ ! -f "$d/report.md" ] || cat "$d/report.md"
+  echo "## Commits ($branch, from ${base:0:12})"
+  git -C "$MAIN" log --oneline "$base..$branch" 2>/dev/null || echo "(branch missing)"
+  echo
+  echo "## Diffstat"
+  git -C "$MAIN" diff --stat "$base...$branch" 2>/dev/null | tail -n 40
+  if [ -d "$wt" ] && [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+    echo
+    echo "## Uncommitted in the worktree"
+    git -C "$wt" status --short | head -n 30
+  fi
+}
+
+cmd_wait() {
+  local re='^(done|exited)$' limit=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --idle) re='^(done|exited|waiting)$'; shift ;;
+      --for) limit="$2"; shift 2 ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+  project
+  local start=$SECONDS found=0 d total acked line state
+  while :; do
+    for d in "$PDIR"/*/; do
+      d="${d%/}"
+      [ -f "$d/events.log" ] || continue
+      total="$(wc -l < "$d/events.log" | tr -d ' ')"
+      acked="$(cat "$d/acked" 2>/dev/null || echo 0)"
+      [ "$total" -gt "$acked" ] || continue
+      line="$(tail -n "+$((acked + 1))" "$d/events.log" | awk -F'\t' -v re="$re" '$2 ~ re' | tail -n 1)"
+      [ -n "$line" ] || continue
+      state="$(printf '%s' "$line" | cut -f2)"
+      echo "=== $(basename "$d"): $state ($(printf '%s' "$line" | cut -f3), $(printf '%s' "$line" | cut -f1))"
+      [ "$state" = waiting ] || summary "$d"
+      echo
+      echo "$total" > "$d/acked"
+      found=1
+    done
+    [ "$found" = 0 ] || exit 0
+    if [ "$limit" -gt 0 ] && [ $((SECONDS - start)) -ge "$limit" ]; then
+      echo "rex-crew: nothing reported in ${limit}s"; exit 2
+    fi
+    sleep 2
+  done
+}
+
+cmd_status() {
+  project
+  local d any=0 wt branch base ahead dirty last
+  printf '%-22s %-9s %-21s %-6s %s\n' NAME STATE SINCE AHEAD BRANCH
+  for d in "$PDIR"/*/; do
+    d="${d%/}"; [ -f "$d/meta.json" ] || continue
+    any=1
+    wt="$(meta "$d" worktree)"; branch="$(meta "$d" branch)"; base="$(meta "$d" base)"
+    ahead="$(git -C "$MAIN" rev-list --count "$base..$branch" 2>/dev/null || echo '?')"
+    dirty=""
+    [ ! -d "$wt" ] || [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || dirty=" (dirty)"
+    last="$(tail -n 1 "$d/events.log" 2>/dev/null | cut -f1)"
+    printf '%-22s %-9s %-21s %-6s %s%s\n' "$(basename "$d")" "$(cat "$d/state" 2>/dev/null || echo '?')" \
+      "${last:-$(meta "$d" created)}" "$ahead" "$branch" "$dirty"
+  done
+  [ "$any" = 1 ] || echo "(no workers in $PROJECT)"
+}
+
+cmd_show() { project; summary "$(worker_dir "${1:?show needs a NAME}")"; }
+
+cmd_send() {
+  [ $# -ge 2 ] || die "send needs a NAME and a MESSAGE"
+  project
+  local d; d="$(worker_dir "$1")"; shift
+  [ "$(cat "$d/state" 2>/dev/null)" != exited ] || die "that worker's pi has exited"
+  mkdir -p "$d/inbox"
+  local f="$d/inbox/$(date +%s)-$RANDOM"
+  printf '%s\n' "$*" > "$f.tmp" && mv "$f.tmp" "$f.md"
+  echo "queued for $(basename "$d")"
+}
+
+cmd_peek() {
+  project
+  local d; d="$(worker_dir "${1:?peek needs a NAME}")"
+  rex capture -b "$(block_of "$d")" --trim | tail -n "${2:-40}"
+}
+
+cmd_focus() {
+  project
+  local d; d="$(worker_dir "${1:?focus needs a NAME}")"
+  if [ "$(meta "$d" layout)" = split ]; then rex focus "$(block_of "$d")"
+  else rex focus "$(window_of "$d")"; fi
+}
+
+cmd_path() { project; meta "$(worker_dir "${1:?path needs a NAME}")" worktree; }
+
+cmd_rm() {
+  [ $# -ge 1 ] || die "rm needs a NAME"
+  local name="$1" force=""
+  [ "${2:-}" != --force ] || force=1
+  project
+  local d; d="$(worker_dir "$name")"
+  local wt branch win
+  wt="$(meta "$d" worktree)"; branch="$(meta "$d" branch)"; win="$(window_of "$d")"
+  if [ -d "$wt" ]; then
+    if [ -n "$force" ]; then git -C "$MAIN" worktree remove --force "$wt"
+    else git -C "$MAIN" worktree remove "$wt" ||
+      die "worktree has uncommitted changes; commit them or use --force"
+    fi
+  fi
+  if git -C "$MAIN" show-ref --verify --quiet "refs/heads/$branch"; then
+    if [ -n "$force" ]; then git -C "$MAIN" branch -D "$branch"
+    else git -C "$MAIN" branch -d "$branch" ||
+      die "branch $branch is not merged; merge it or use --force (worktree already removed)"
+    fi
+  fi
+  if [ "$(meta "$d" layout)" = split ]; then
+    rex block close "$(jq -r '.rex.block_ids[0] // empty' "$d/meta.json")" >/dev/null 2>&1 || true
+  else
+    [ -z "$win" ] || rex window close "$win" >/dev/null 2>&1 || true
+  fi
+  # The task, report and event log go to the Trash, not straight to deletion.
+  local trash="$HOME/.Trash"
+  [ -d "$trash" ] || { trash="$STATE_ROOT/.removed"; mkdir -p "$trash"; }
+  mv "$d" "$trash/rex-crew-$PROJECT-$name-$(date +%Y%m%d-%H%M%S)"
+  echo "removed $name"
+}
+
+case "${1:-}" in
+  spawn|wait|status|show|send|peek|focus|path|rm) c="$1"; shift; "cmd_$c" "$@" ;;
+  ls) shift; cmd_status "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *) die "unknown command '$1' (rex-crew --help)" ;;
+esac

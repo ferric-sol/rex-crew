@@ -13,19 +13,47 @@ deploy.
 └──────────────────────────┴────────────────────────┘
 ```
 
-## Quickstart for your agent
+## Quickstart
 
-Paste this to Claude Code running in a Rex pane, inside your project's repository:
+Say this to Claude Code running in a Rex pane, inside your project's repository:
 
-> Set up rex-crew from https://github.com/ferric-sol/rex-crew: clone it to ~/code/rex-crew, read its README, and run
-> `./install.sh`. Tell me anything it reports missing (rex, pi, jq, git, the advisor config) before going on.
->
-> Then use it to split up this task across workers: **<your task, or "issue #N">**. For each worker, write a brief
-> from `examples/brief-template.md` with the scope, the files it owns, what it must not touch, and the numbered
-> advisor checkpoints. Spawn each worker with `rex-crew spawn NAME --base origin/main --task-file BRIEF`, and run
-> `rex-crew wait --idle` in the background. When one reports, review its diff the way you would a pull request and
-> send fixes back with `rex-crew send`. When the branches are good, combine them on one branch, run the tests and open
-> a pull request. Don't merge, deploy or push anywhere public without asking me.
+> Set up rex-crew (https://github.com/ferric-sol/rex-crew), then spin up a crew to work on the feature described in
+> this issue: <issue url>
+
+The agent follows the next section.
+
+## For the orchestrating agent
+
+You were asked to set up rex-crew and run a crew on a task. Do this:
+
+1. **Set up.** Clone https://github.com/ferric-sol/rex-crew to `~/code/rex-crew` (or `git pull` if it is there), read
+   this README, and run `./install.sh`. If it reports anything missing (rex, pi, jq, git, the advisor config), tell
+   the user and stop until it is fixed. You must be running inside Rex (`REX_SESSION` set) and inside the project's
+   repository.
+2. **Read the task.** Read the issue with its comments (`gh issue view <url> --comments`) and the code it touches.
+   Settle what is decided and what is still open. Ask the user about anything open before spawning.
+3. **Split it.** Use one worker per part that owns its own files; one worker is fine for a small task. Split by file
+   ownership, so no two workers edit the same file. If two parts must share a new file, write its exact content into
+   both briefs and tell both workers to create it word for word, so the branches merge cleanly.
+4. **Brief each worker** from `examples/brief-template.md`. The worker knows only the brief, so include:
+   - the scope, as concrete items with file paths;
+   - what it must not touch, and which worker owns that;
+   - how to test;
+   - the numbered advisor checkpoints: plan, then each item, then the full diff.
+   Write the brief to a file.
+5. **Spawn and wait.**
+   - Start each worker with `rex-crew spawn NAME --base origin/main --task-file BRIEF`. Add `--setup` when the
+     worktree needs dependencies.
+   - Run `rex-crew wait --idle` in the background, and run it again each time it returns.
+   - Early on, check the worker's pi session log (`~/.pi/agent/sessions/--<worktree path>--/*.jsonl`) for
+     `ask_advisor` calls.
+6. **Review each report** like a pull request: `rex-crew show NAME`, then `git diff origin/main...NAME`. Send real bugs
+   back with `rex-crew send NAME "..."`, including ones the worker only documented. Then wait again.
+7. **Combine.** When every branch is good, merge them onto one branch off `origin/main`, resolve conflicts, run the
+   full test suite, and open one pull request that says what was built, what is known to be limited, and how to
+   deploy. Then `rex-crew rm NAME` each worker (`--force` if only untracked files are left).
+8. **Ask before** merging the pull request, deploying, or pushing anything public. Report to the user what the crew
+   built, the pull request link, and anything left for them to decide.
 
 ## Install
 

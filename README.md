@@ -13,6 +13,20 @@ deploy.
 └──────────────────────────┴────────────────────────┘
 ```
 
+## Quickstart for your agent
+
+Paste this to Claude Code running in a Rex pane, inside your project's repository:
+
+> Set up rex-crew from https://github.com/ferric-sol/rex-crew: clone it to ~/code/rex-crew, read its README, and run
+> `./install.sh`. Tell me anything it reports missing (rex, pi, jq, git, the advisor config) before going on.
+>
+> Then use it to split up this task across workers: **<your task, or "issue #N">**. For each worker, write a brief
+> from `examples/brief-template.md` with the scope, the files it owns, what it must not touch, and the numbered
+> advisor checkpoints. Spawn each worker with `rex-crew spawn NAME --base origin/main --task-file BRIEF`, and run
+> `rex-crew wait --idle` in the background. When one reports, review its diff the way you would a pull request and
+> send fixes back with `rex-crew send`. When the branches are good, combine them on one branch, run the tests and open
+> a pull request. Don't merge, deploy or push anywhere public without asking me.
+
 ## Install
 
 ```bash
